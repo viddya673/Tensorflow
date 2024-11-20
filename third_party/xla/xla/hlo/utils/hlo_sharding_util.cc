@@ -65,6 +65,15 @@ limitations under the License.
 namespace xla {
 namespace hlo_sharding_util {
 
+void GatherScatterDims::append(const GatherScatterDims& other) {
+  operand_dims.insert(operand_dims.end(), other.operand_dims.begin(),
+                      other.operand_dims.end());
+  indices_dims.insert(indices_dims.end(), other.indices_dims.begin(),
+                      other.indices_dims.end());
+  output_dims.insert(output_dims.end(), other.output_dims.begin(),
+                     other.output_dims.end());
+}
+
 bool IsSubTilingOrEqualSharding(const Shape& potential_sharded_shape,
                                 const HloSharding& potential_subsharding,
                                 const HloSharding& sharding) {
@@ -1196,44 +1205,42 @@ HloSharding PropagateShardingAlongDimsAndReplicateOthers(
                                      replicate_other_dims.metadata());
 }
 
-HloSharding GatherOutputShardingFromIndexIndexPassthroughDimensions(
-    const HloSharding& index_sharding, const HloInstruction* hlo) {
+HloSharding GatherOutputShardingFromIndex(const HloSharding& index_sharding,
+                                          const HloInstruction* hlo,
+                                          bool consider_explicit_batch_dims) {
   CHECK(hlo->opcode() == HloOpcode::kGather);
   if (index_sharding.IsTileMaximal() || index_sharding.IsManual()) {
     return index_sharding;
   }
 
   const GatherDimensionNumbers& dnums = hlo->gather_dimension_numbers();
-  const absl::InlinedVector<int64_t, 1> index_passthrough_dims =
-      GetGatherScatterIndexPassthroughIndexDims(hlo->operand(1)->shape().rank(),
-                                                dnums.index_vector_dim());
-  const absl::InlinedVector<int64_t, 1> output_passthrough_dims =
-      GetGatherScatterIndexPassthroughOutputOrUpdateDims(hlo->shape().rank(),
-                                                         dnums.offset_dims());
-  CHECK_EQ(index_passthrough_dims.size(), output_passthrough_dims.size());
+  const GatherScatterDims indices_output_dims =
+      GetGatherConnectedDimsAcrossIndicesAndOutput(
+          hlo->operand(1)->shape().rank(), dnums.index_vector_dim(),
+          dnums.start_indices_batching_dims(), hlo->shape().rank(),
+          dnums.offset_dims(), consider_explicit_batch_dims);
   return PropagateShardingAlongDimsAndReplicateOthers(
-      index_sharding, index_passthrough_dims, output_passthrough_dims,
-      hlo->shape().rank());
+      index_sharding, indices_output_dims.indices_dims,
+      indices_output_dims.output_dims, hlo->shape().rank());
 }
 
-HloSharding GatherIndexShardingFromOutputIndexPassthroughDimensions(
-    const HloSharding& output_sharding, const HloInstruction* hlo) {
+HloSharding GatherIndexShardingFromOutput(const HloSharding& output_sharding,
+                                          const HloInstruction* hlo,
+                                          bool consider_explicit_batch_dims) {
   CHECK(hlo->opcode() == HloOpcode::kGather);
   if (output_sharding.IsTileMaximal() || output_sharding.IsManual()) {
     return output_sharding;
   }
 
   const GatherDimensionNumbers& dnums = hlo->gather_dimension_numbers();
-  const absl::InlinedVector<int64_t, 1> index_passthrough_dims =
-      GetGatherScatterIndexPassthroughIndexDims(hlo->operand(1)->shape().rank(),
-                                                dnums.index_vector_dim());
-  const absl::InlinedVector<int64_t, 1> output_passthrough_dims =
-      GetGatherScatterIndexPassthroughOutputOrUpdateDims(hlo->shape().rank(),
-                                                         dnums.offset_dims());
-  CHECK_EQ(index_passthrough_dims.size(), output_passthrough_dims.size());
+  const GatherScatterDims indices_output_dims =
+      GetGatherConnectedDimsAcrossIndicesAndOutput(
+          hlo->operand(1)->shape().rank(), dnums.index_vector_dim(),
+          dnums.start_indices_batching_dims(), hlo->shape().rank(),
+          dnums.offset_dims(), consider_explicit_batch_dims);
   return PropagateShardingAlongDimsAndReplicateOthers(
-      output_sharding, output_passthrough_dims, index_passthrough_dims,
-      hlo->operand(1)->shape().rank());
+      output_sharding, indices_output_dims.output_dims,
+      indices_output_dims.indices_dims, hlo->operand(1)->shape().rank());
 }
 
 HloSharding GatherEffectiveOutputSharding(const HloInstruction& hlo) {
@@ -1288,43 +1295,43 @@ HloSharding GatherEffectiveOutputSharding(const HloInstruction& hlo) {
   return HloSharding::Tile(tile_assignment, hlo.sharding().metadata());
 }
 
-HloSharding ScatterIndexShardingFromUpdateIndexPassthroughDimensions(
-    const HloSharding& update_sharding, const HloScatterInstruction* scatter) {
+HloSharding ScatterIndexShardingFromUpdate(const HloSharding& update_sharding,
+                                           const HloScatterInstruction* scatter,
+                                           bool consider_explicit_batch_dims) {
   if (update_sharding.IsTileMaximal() || update_sharding.IsManual()) {
     return update_sharding;
   }
 
   const ScatterDimensionNumbers& dnums = scatter->scatter_dimension_numbers();
-  const absl::InlinedVector<int64_t, 1> index_passthrough_dims =
-      GetGatherScatterIndexPassthroughIndexDims(
-          scatter->scatter_indices()->shape().rank(), dnums.index_vector_dim());
-  const absl::InlinedVector<int64_t, 1> update_passthrough_dims =
-      GetGatherScatterIndexPassthroughOutputOrUpdateDims(
+  const GatherScatterDims indices_update_dims =
+      GetGatherConnectedDimsAcrossIndicesAndOutput(
+          scatter->scatter_indices()->shape().rank(), dnums.index_vector_dim(),
+          dnums.scatter_indices_batching_dims(),
           scatter->scatter_updates()[0]->shape().rank(),
-          dnums.update_window_dims());
-  CHECK_EQ(index_passthrough_dims.size(), update_passthrough_dims.size());
+          dnums.update_window_dims(), consider_explicit_batch_dims);
   return PropagateShardingAlongDimsAndReplicateOthers(
-      update_sharding, update_passthrough_dims, index_passthrough_dims,
+      update_sharding, indices_update_dims.output_dims,
+      indices_update_dims.indices_dims,
       scatter->scatter_indices()->shape().rank());
 }
 
-HloSharding ScatterUpdateShardingFromIndexIndexPassthroughDimensions(
-    const HloSharding& index_sharding, const HloScatterInstruction* scatter) {
+HloSharding ScatterUpdateShardingFromIndex(const HloSharding& index_sharding,
+                                           const HloScatterInstruction* scatter,
+                                           bool consider_explicit_batch_dims) {
   if (index_sharding.IsTileMaximal() || index_sharding.IsManual()) {
     return index_sharding;
   }
 
   const ScatterDimensionNumbers& dnums = scatter->scatter_dimension_numbers();
-  const absl::InlinedVector<int64_t, 1> index_passthrough_dims =
-      GetGatherScatterIndexPassthroughIndexDims(
-          scatter->scatter_indices()->shape().rank(), dnums.index_vector_dim());
-  const absl::InlinedVector<int64_t, 1> update_passthrough_dims =
-      GetGatherScatterIndexPassthroughOutputOrUpdateDims(
+  const GatherScatterDims indices_update_dims =
+      GetGatherConnectedDimsAcrossIndicesAndOutput(
+          scatter->scatter_indices()->shape().rank(), dnums.index_vector_dim(),
+          dnums.scatter_indices_batching_dims(),
           scatter->scatter_updates()[0]->shape().rank(),
-          dnums.update_window_dims());
-  CHECK_EQ(index_passthrough_dims.size(), update_passthrough_dims.size());
+          dnums.update_window_dims(), consider_explicit_batch_dims);
   return PropagateShardingAlongDimsAndReplicateOthers(
-      index_sharding, index_passthrough_dims, update_passthrough_dims,
+      index_sharding, indices_update_dims.indices_dims,
+      indices_update_dims.output_dims,
       scatter->scatter_updates()[0]->shape().rank());
 }
 
@@ -1594,36 +1601,28 @@ std::optional<HloSharding> GatherOperandShardingFromOutputParallelDimensions(
     return output_sharding;
   }
 
-  GatherScatterParallelDims parallel_dims;
+  GatherScatterDims parallel_dims;
 
   const GatherDimensionNumbers& dnums = gather.gather_dimension_numbers();
   if (!dnums.operand_batching_dims().empty()) {
-    parallel_dims.operand_parallel_dims.assign(
-        dnums.operand_batching_dims().begin(),
-        dnums.operand_batching_dims().end());
-    parallel_dims.indices_parallel_dims.assign(
+    parallel_dims.operand_dims.assign(dnums.operand_batching_dims().begin(),
+                                      dnums.operand_batching_dims().end());
+    parallel_dims.indices_dims.assign(
         dnums.start_indices_batching_dims().begin(),
         dnums.start_indices_batching_dims().end());
   }
-  if (std::optional<GatherScatterParallelDims> implicit_parallel_dims =
+  if (std::optional<GatherScatterDims> implicit_parallel_dims =
           GetGatherParallelBatchDims(gather, call_graph)) {
-    parallel_dims.operand_parallel_dims.insert(
-        parallel_dims.operand_parallel_dims.end(),
-        implicit_parallel_dims->operand_parallel_dims.begin(),
-        implicit_parallel_dims->operand_parallel_dims.end());
-    parallel_dims.indices_parallel_dims.insert(
-        parallel_dims.indices_parallel_dims.end(),
-        implicit_parallel_dims->indices_parallel_dims.begin(),
-        implicit_parallel_dims->indices_parallel_dims.end());
+    parallel_dims.append(*implicit_parallel_dims);
   }
 
-  if (parallel_dims.operand_parallel_dims.empty()) {
+  if (parallel_dims.operand_dims.empty()) {
     return std::nullopt;
   }
 
   return PropagateShardingAlongDimsAndReplicateOthers(
       output_sharding, GetGatherParallelOutputDims(gather, parallel_dims),
-      parallel_dims.operand_parallel_dims, gather.operand(0)->shape().rank());
+      parallel_dims.operand_dims, gather.operand(0)->shape().rank());
 }
 
 }  // namespace
@@ -1777,34 +1776,27 @@ std::optional<HloSharding> ScatterUpdateShardingFromOutputParallelDimensions(
     return output_sharding;
   }
 
-  GatherScatterParallelDims parallel_dims;
+  GatherScatterDims parallel_dims;
 
   const ScatterDimensionNumbers& dnums = scatter.scatter_dimension_numbers();
   if (!dnums.input_batching_dims().empty()) {
-    parallel_dims.operand_parallel_dims.assign(
-        dnums.input_batching_dims().begin(), dnums.input_batching_dims().end());
-    parallel_dims.indices_parallel_dims.assign(
+    parallel_dims.operand_dims.assign(dnums.input_batching_dims().begin(),
+                                      dnums.input_batching_dims().end());
+    parallel_dims.indices_dims.assign(
         dnums.scatter_indices_batching_dims().begin(),
         dnums.scatter_indices_batching_dims().end());
   }
-  if (std::optional<GatherScatterParallelDims> implicit_parallel_dims =
+  if (std::optional<GatherScatterDims> implicit_parallel_dims =
           GetScatterParallelBatchDims(scatter, call_graph)) {
-    parallel_dims.operand_parallel_dims.insert(
-        parallel_dims.operand_parallel_dims.end(),
-        implicit_parallel_dims->operand_parallel_dims.begin(),
-        implicit_parallel_dims->operand_parallel_dims.end());
-    parallel_dims.indices_parallel_dims.insert(
-        parallel_dims.indices_parallel_dims.end(),
-        implicit_parallel_dims->indices_parallel_dims.begin(),
-        implicit_parallel_dims->indices_parallel_dims.end());
+    parallel_dims.append(*implicit_parallel_dims);
   }
 
-  if (parallel_dims.operand_parallel_dims.empty()) {
+  if (parallel_dims.operand_dims.empty()) {
     return std::nullopt;
   }
 
   return PropagateShardingAlongDimsAndReplicateOthers(
-      output_sharding, parallel_dims.operand_parallel_dims,
+      output_sharding, parallel_dims.operand_dims,
       GetScatterParallelUpdateDims(scatter, parallel_dims),
       scatter.scatter_updates()[0]->shape().rank());
 }
@@ -2224,7 +2216,7 @@ std::optional<int64_t> GetDimensionForIota(const HloInstruction* maybe_iota,
   return std::nullopt;
 }
 
-std::optional<GatherScatterParallelDims> GetGatherScatterBatchParallelDims(
+std::optional<GatherScatterDims> GetGatherScatterBatchParallelDims(
     const HloInstruction* operand, const HloInstruction* indices,
     absl::Span<const int64_t> slice_sizes, int64_t index_vector_dim,
     absl::Span<const int64_t> index_map,
@@ -2286,8 +2278,7 @@ std::optional<GatherScatterParallelDims> GetGatherScatterBatchParallelDims(
     }
   }
 
-  absl::InlinedVector<int64_t, 1> indices_parallel_dims;
-  absl::InlinedVector<int64_t, 1> operand_parallel_dims;
+  GatherScatterDims result;
   // Map the parallelizable dimension from the iota to the dimensions of the
   // output and the operand. These dimensions are interconnected, but between
   // operands and index they could have different spots in the shape because the
@@ -2298,7 +2289,7 @@ std::optional<GatherScatterParallelDims> GetGatherScatterBatchParallelDims(
     if (indices_parallel_dim == -1) {
       continue;
     }
-    if (absl::c_linear_search(indices_parallel_dims, indices_parallel_dim)) {
+    if (absl::c_linear_search(result.indices_dims, indices_parallel_dim)) {
       return std::nullopt;
     }
     // Considered parallel if (1) the slice size is 1 over the operand, (2) it
@@ -2310,19 +2301,18 @@ std::optional<GatherScatterParallelDims> GetGatherScatterBatchParallelDims(
           indices->shape().dimensions(indices_parallel_dim)) {
         return std::nullopt;
       }
-      indices_parallel_dims.push_back(indices_parallel_dim);
-      operand_parallel_dims.push_back(operand_parallel_dim);
+      result.indices_dims.push_back(indices_parallel_dim);
+      result.operand_dims.push_back(operand_parallel_dim);
     }
   }
 
-  if (!indices_parallel_dims.empty()) {
-    return GatherScatterParallelDims{indices_parallel_dims,
-                                     operand_parallel_dims};
+  if (!result.indices_dims.empty()) {
+    return result;
   }
   return std::nullopt;
 }
 
-std::optional<GatherScatterParallelDims> GetGatherParallelBatchDims(
+std::optional<GatherScatterDims> GetGatherParallelBatchDims(
     const HloInstruction& hlo, const CallGraph& call_graph) {
   CHECK(DynCast<HloGatherInstruction>(&hlo));
   const HloInstruction* operand = hlo.operand(0);
@@ -2334,7 +2324,7 @@ std::optional<GatherScatterParallelDims> GetGatherParallelBatchDims(
       dnums.start_index_map(), dnums.start_indices_batching_dims(), call_graph);
 }
 
-std::optional<GatherScatterParallelDims> GetScatterParallelBatchDims(
+std::optional<GatherScatterDims> GetScatterParallelBatchDims(
     const HloInstruction& hlo, const CallGraph& call_graph) {
   const HloScatterInstruction* scatter = DynCast<HloScatterInstruction>(&hlo);
   CHECK(scatter);
@@ -2373,19 +2363,18 @@ GetGatherOutputOrScatterUpdateParallelDims(
 }
 
 absl::InlinedVector<int64_t, 1> GetGatherParallelOutputDims(
-    const HloInstruction& hlo, const GatherScatterParallelDims& parallel_dim) {
+    const HloInstruction& hlo, const GatherScatterDims& parallel_dim) {
   CHECK(DynCast<HloGatherInstruction>(&hlo));
   const Shape& output_shape = hlo.shape();
   const auto& dnums = hlo.gather_dimension_numbers();
   int64_t index_vector_dim = dnums.index_vector_dim();
   const auto& offset_dims = dnums.offset_dims();
   return GetGatherOutputOrScatterUpdateParallelDims(
-      output_shape, parallel_dim.indices_parallel_dims, index_vector_dim,
-      offset_dims);
+      output_shape, parallel_dim.indices_dims, index_vector_dim, offset_dims);
 }
 
 absl::InlinedVector<int64_t, 1> GetScatterParallelUpdateDims(
-    const HloInstruction& hlo, const GatherScatterParallelDims& parallel_dim) {
+    const HloInstruction& hlo, const GatherScatterDims& parallel_dim) {
   const HloScatterInstruction* scatter = DynCast<HloScatterInstruction>(&hlo);
   CHECK(scatter);
   const Shape update_shape = scatter->scatter_updates()[0]->shape();
@@ -2393,8 +2382,7 @@ absl::InlinedVector<int64_t, 1> GetScatterParallelUpdateDims(
   int64_t index_vector_dim = dnums.index_vector_dim();
   const auto& window_dims = dnums.update_window_dims();
   return GetGatherOutputOrScatterUpdateParallelDims(
-      update_shape, parallel_dim.indices_parallel_dims, index_vector_dim,
-      window_dims);
+      update_shape, parallel_dim.indices_dims, index_vector_dim, window_dims);
 }
 
 absl::InlinedVector<int64_t, 1> GetGatherOperandPassthroughOperandDims(
@@ -2438,29 +2426,28 @@ absl::InlinedVector<int64_t, 1> GetScatterOperandPassthroughUpdateDims(
       dnums.update_window_dims(), slice_sizes);
 }
 
-absl::InlinedVector<int64_t, 1> GetGatherScatterIndexPassthroughIndexDims(
-    const int64_t indices_rank, const int64_t index_vector_dim) {
-  absl::InlinedVector<int64_t, 1> passthrough_dims;
-  for (int64_t i = 0; i != indices_rank; ++i) {
-    if (i == index_vector_dim) {
+GatherScatterDims GetGatherConnectedDimsAcrossIndicesAndOutput(
+    int64_t indices_rank, int64_t index_vector_dim,
+    absl::Span<const int64_t> indices_batching_dims, int64_t output_rank,
+    absl::Span<const int64_t> offset_dims, bool consider_explicit_batch_dims) {
+  GatherScatterDims result;
+  for (int64_t output_dim = 0, indices_dim = 0; output_dim < output_rank;
+       ++output_dim) {
+    if (absl::c_linear_search(offset_dims, output_dim)) {
       continue;
     }
-    passthrough_dims.push_back(i);
-  }
-  return passthrough_dims;
-}
-
-absl::InlinedVector<int64_t, 1>
-GetGatherScatterIndexPassthroughOutputOrUpdateDims(
-    const int64_t output_or_update_rank,
-    absl::Span<const int64_t> offset_or_window_dims) {
-  absl::InlinedVector<int64_t, 1> passthrough_dims;
-  for (int64_t i = 0; i != output_or_update_rank; ++i) {
-    if (!absl::c_linear_search(offset_or_window_dims, i)) {
-      passthrough_dims.push_back(i);
+    if (indices_dim == index_vector_dim) {
+      indices_dim++;
     }
+    CHECK_LT(indices_dim, indices_rank);
+    if (consider_explicit_batch_dims ||
+        !absl::c_linear_search(indices_batching_dims, indices_dim)) {
+      result.indices_dims.push_back(indices_dim);
+      result.output_dims.push_back(output_dim);
+    }
+    ++indices_dim;
   }
-  return passthrough_dims;
+  return result;
 }
 
 HloSharding InferGatherScatterParallelShardingFromOperandSharding(

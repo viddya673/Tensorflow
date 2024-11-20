@@ -473,7 +473,7 @@ std::optional<HloSharding> LookaheadUserSharding(HloInstruction* instr,
 // and indices.
 bool InferGatherParallelShardingFromOperands(
     HloInstruction* instruction,
-    const hlo_sharding_util::GatherScatterParallelDims& parallel_dims,
+    const hlo_sharding_util::GatherScatterDims& parallel_dims,
     bool may_combine_partial_sharding) {
   CHECK(DynCast<HloGatherInstruction>(instruction));
   bool changed = false;
@@ -485,7 +485,7 @@ bool InferGatherParallelShardingFromOperands(
         hlo_sharding_util::
             InferGatherScatterParallelShardingFromOperandSharding(
                 instruction->operand(0)->sharding(), instruction->shape(),
-                absl::MakeConstSpan(parallel_dims.operand_parallel_dims),
+                absl::MakeConstSpan(parallel_dims.operand_dims),
                 absl::MakeConstSpan(output_parallel_dims)),
         instruction, may_combine_partial_sharding);
   }
@@ -495,7 +495,7 @@ bool InferGatherParallelShardingFromOperands(
         hlo_sharding_util::
             InferGatherScatterParallelShardingFromOperandSharding(
                 instruction->operand(1)->sharding(), instruction->shape(),
-                absl::MakeConstSpan(parallel_dims.indices_parallel_dims),
+                absl::MakeConstSpan(parallel_dims.indices_dims),
                 absl::MakeConstSpan(output_parallel_dims)),
         instruction, may_combine_partial_sharding);
   }
@@ -506,7 +506,7 @@ bool InferGatherParallelShardingFromOperands(
 // indices and updates.
 bool InferScatterParallelShardingFromOperands(
     HloInstruction* instruction,
-    const hlo_sharding_util::GatherScatterParallelDims& parallel_dims,
+    const hlo_sharding_util::GatherScatterDims& parallel_dims,
     bool may_combine_partial_sharding) {
   HloScatterInstruction* scatter = DynCast<HloScatterInstruction>(instruction);
   CHECK(scatter);
@@ -527,8 +527,8 @@ bool InferScatterParallelShardingFromOperands(
           hlo_sharding_util::
               InferGatherScatterParallelShardingFromOperandSharding(
                   scatter_operands[i]->sharding(), shape,
-                  absl::MakeConstSpan(parallel_dims.operand_parallel_dims),
-                  absl::MakeConstSpan(parallel_dims.operand_parallel_dims)),
+                  absl::MakeConstSpan(parallel_dims.operand_dims),
+                  absl::MakeConstSpan(parallel_dims.operand_dims)),
           instruction, {i}, may_combine_partial_sharding);
     }
   }
@@ -537,8 +537,8 @@ bool InferScatterParallelShardingFromOperands(
     auto parallel_sharding_from_indices = hlo_sharding_util::
         InferGatherScatterParallelShardingFromOperandSharding(
             scatter_indices->sharding(), shape,
-            absl::MakeConstSpan(parallel_dims.indices_parallel_dims),
-            absl::MakeConstSpan(parallel_dims.operand_parallel_dims));
+            absl::MakeConstSpan(parallel_dims.indices_dims),
+            absl::MakeConstSpan(parallel_dims.operand_dims));
     for (int64_t i = 0; i != operand_count; ++i) {
       changed |= MaybeImproveInstructionSubSharding(
           parallel_sharding_from_indices, instruction, {i},
@@ -553,7 +553,7 @@ bool InferScatterParallelShardingFromOperands(
               InferGatherScatterParallelShardingFromOperandSharding(
                   scatter_updates[i]->sharding(), shape,
                   absl::MakeConstSpan(update_parallel_dims),
-                  absl::MakeConstSpan(parallel_dims.operand_parallel_dims)),
+                  absl::MakeConstSpan(parallel_dims.operand_dims)),
           instruction, {i}, may_combine_partial_sharding);
     }
   }
@@ -1876,9 +1876,8 @@ std::optional<HloSharding> ShardingPropagation::GetShardingFromUser(
     }
     case HloOpcode::kGather: {
       if (&instruction == user.operand(1)) {
-        return hlo_sharding_util::
-            GatherIndexShardingFromOutputIndexPassthroughDimensions(
-                user.sharding(), &user);
+        return hlo_sharding_util::GatherIndexShardingFromOutput(user.sharding(),
+                                                                &user);
       }
       if (is_spmd) {
         return hlo_sharding_util::GatherOperandShardingFromOutput(
@@ -1916,9 +1915,8 @@ std::optional<HloSharding> ShardingPropagation::GetShardingFromUser(
         absl::c_transform(
             partitioned_updates, std::back_inserter(shardings),
             [&scatter_user](const HloInstruction* update) {
-              return hlo_sharding_util::
-                  ScatterIndexShardingFromUpdateIndexPassthroughDimensions(
-                      update->sharding(), &scatter_user);
+              return hlo_sharding_util::ScatterIndexShardingFromUpdate(
+                  update->sharding(), &scatter_user);
             });
         return hlo_sharding_util::FindCommonSharding(shardings);
       }
@@ -1928,9 +1926,8 @@ std::optional<HloSharding> ShardingPropagation::GetShardingFromUser(
       CHECK_LE(update_index, operand_count);
       auto from_indices =
           hlo_sharding_util::IsSpatiallyPartitioned(scatter_indices)
-              ? hlo_sharding_util::
-                    ScatterUpdateShardingFromIndexIndexPassthroughDimensions(
-                        scatter_indices->sharding(), &scatter_user)
+              ? hlo_sharding_util::ScatterUpdateShardingFromIndex(
+                    scatter_indices->sharding(), &scatter_user)
               : HloSharding::Replicate();
       if (is_spmd) {
         auto from_output = hlo_sharding_util::ScatterUpdateShardingFromOutput(
@@ -2507,11 +2504,11 @@ bool ShardingPropagation::InferShardingFromOperands(
       const GatherDimensionNumbers& dnums =
           instruction->gather_dimension_numbers();
       if (!dnums.operand_batching_dims().empty()) {
-        hlo_sharding_util::GatherScatterParallelDims explicit_batch_dims;
-        explicit_batch_dims.operand_parallel_dims.assign(
+        hlo_sharding_util::GatherScatterDims explicit_batch_dims;
+        explicit_batch_dims.operand_dims.assign(
             dnums.operand_batching_dims().begin(),
             dnums.operand_batching_dims().end());
-        explicit_batch_dims.indices_parallel_dims.assign(
+        explicit_batch_dims.indices_dims.assign(
             dnums.start_indices_batching_dims().begin(),
             dnums.start_indices_batching_dims().end());
         changed |= InferGatherParallelShardingFromOperands(
@@ -2519,8 +2516,8 @@ bool ShardingPropagation::InferShardingFromOperands(
       }
 
       if (hlo_sharding_util::IsSpatiallyPartitioned(instruction->operand(1))) {
-        HloSharding new_sharding = hlo_sharding_util::
-            GatherOutputShardingFromIndexIndexPassthroughDimensions(
+        HloSharding new_sharding =
+            hlo_sharding_util::GatherOutputShardingFromIndex(
                 instruction->operand(1)->sharding(), instruction);
         changed |= MaybeImproveInstructionSharding(
             std::move(new_sharding), instruction, may_combine_partial_sharding);
@@ -2537,8 +2534,8 @@ bool ShardingPropagation::InferShardingFromOperands(
                 instruction->operand(0))) {
           absl::Span<const int64_t> operand_parallel_dims;
           if (gather_parallel_dims) {
-            operand_parallel_dims = absl::MakeConstSpan(
-                gather_parallel_dims->operand_parallel_dims);
+            operand_parallel_dims =
+                absl::MakeConstSpan(gather_parallel_dims->operand_dims);
           }
           HloSharding filtered_operand_sharding =
               hlo_sharding_util::PartiallyReplicateTiledShardingOnDims(
@@ -2562,11 +2559,11 @@ bool ShardingPropagation::InferShardingFromOperands(
       const ScatterDimensionNumbers& dnums =
           instruction->scatter_dimension_numbers();
       if (!dnums.input_batching_dims().empty()) {
-        hlo_sharding_util::GatherScatterParallelDims explicit_batch_dims;
-        explicit_batch_dims.operand_parallel_dims.assign(
+        hlo_sharding_util::GatherScatterDims explicit_batch_dims;
+        explicit_batch_dims.operand_dims.assign(
             dnums.input_batching_dims().begin(),
             dnums.input_batching_dims().end());
-        explicit_batch_dims.indices_parallel_dims.assign(
+        explicit_batch_dims.indices_dims.assign(
             dnums.scatter_indices_batching_dims().begin(),
             dnums.scatter_indices_batching_dims().end());
         changed |= InferScatterParallelShardingFromOperands(
