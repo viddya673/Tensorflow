@@ -1,3 +1,5 @@
+# This patch is already a public patch. It should be removed in the next integration.
+
 diff --git a/lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp b/lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp
 index eb26ffe3b..ba87d671e 100644
 --- a/lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp
@@ -136,26 +138,6 @@ index fb0e7f6fd..37795c20c 100644
          return WalkResult::advance();
        OpBuilder builder(op);
        auto a = op->getOperand(0);
-diff --git a/third_party/nvidia/include/Dialect/NVGPU/IR/NVGPUOps.td b/third_party/nvidia/include/Dialect/NVGPU/IR/NVGPUOps.td
-index 7affd8840..52aa2c131 100644
---- a/third_party/nvidia/include/Dialect/NVGPU/IR/NVGPUOps.td
-+++ b/third_party/nvidia/include/Dialect/NVGPU/IR/NVGPUOps.td
-@@ -87,6 +87,15 @@ def NVGPU_WGMMAOp : NVGPU_Op<"wgmma", []> {
-   let assemblyFormat = "$opA `,` $opB `,` $useC (`,` $opC^)? attr-dict `:` functional-type(operands, $res)";
- }
- 
-+def NVGPU_SparseWGMMAOp : NVGPU_Op<"wgmma_sp", []> {
-+  let arguments = (ins WGMMA_OperandType:$opA, I32:$metaA, WGMMA_OperandType:$opB, LLVM_AnyStruct:$opC,
-+                   I32Attr:$m, I32Attr:$n, I32Attr:$k,
-+                   WGMMA_EltTypeAttr:$eltTypeC, WGMMA_EltTypeAttr:$eltTypeA, WGMMA_EltTypeAttr:$eltTypeB,
-+                   WGMMA_LayoutAttr:$layoutA, WGMMA_LayoutAttr:$layoutB);
-+  let results = (outs LLVM_AnyStruct:$res);
-+  let assemblyFormat = "$opA `meta` $metaA `,` $opB `,` $opC attr-dict `:` functional-type(operands, $res)";
-+}
-+
- def NVGPU_FenceAsyncSharedOp : NVGPU_Op<"fence_async_shared", []> {
-   let arguments = (ins BoolAttr:$bCluster);
-   let assemblyFormat = "attr-dict";
 diff --git a/third_party/nvidia/lib/TritonNVIDIAGPUToLLVM/DotOpToLLVM/WGMMA.cpp b/third_party/nvidia/lib/TritonNVIDIAGPUToLLVM/DotOpToLLVM/WGMMA.cpp
 index baed96a29..e9d7f5859 100644
 --- a/third_party/nvidia/lib/TritonNVIDIAGPUToLLVM/DotOpToLLVM/WGMMA.cpp
@@ -171,3 +153,54 @@ index baed96a29..e9d7f5859 100644
    // Create descriptor based on the format described in the spec:
    // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shared-memory-layout-matrix-descriptor
    union WGMMADescriptor {
+diff --git a/lib/Conversion/TritonToTritonGPU/TritonGPUConversion.cpp b/lib/Conversion/TritonToTritonGPU/TritonGPUConversion.cpp
+index 34fb89954..a0172e107 100644
+--- a/lib/Conversion/TritonToTritonGPU/TritonGPUConversion.cpp
++++ b/lib/Conversion/TritonToTritonGPU/TritonGPUConversion.cpp
+@@ -57,6 +57,12 @@ TritonGPUTypeConverter::TritonGPUTypeConverter(MLIRContext *context,
+   addArgumentMaterialization([&](OpBuilder &builder,
+                                  RankedTensorType tensorType, ValueRange inputs,
+                                  Location loc) -> Value {
++    // Allows partial TTIR to TTGIR conversion by materializing a conversion for
++    // remaining arguments that have been converted to a new type.
++    // We use this to rewrite triton_xla.sparse_dot in a separate pass after
++    // 'convert-triton-to-tritongpu'.
++    return builder.create<triton::gpu::ConvertLayoutOp>(loc, tensorType,
++                                                        inputs);
+     llvm_unreachable("Argument rematerialization should not happen in Triton "
+                      "-> TritonGPU conversion");
+     return {};
+@@ -67,5 +73,11 @@ TritonGPUTypeConverter::TritonGPUTypeConverter(MLIRContext *context,
+   addSourceMaterialization([&](OpBuilder &builder, RankedTensorType tensorType,
+                                ValueRange inputs, Location loc) -> Value {
++    // Allows partial TTIR to TTGIR conversion by materializing a conversion for
++    // remaining uses of values that have been converted to a new type.
++    // We use this to rewrite triton_xla.sparse_dot in a separate pass after
++    // 'convert-triton-to-tritongpu'.
++    return builder.create<triton::gpu::ConvertLayoutOp>(loc, tensorType,
++                                                        inputs);
+     llvm_unreachable("Source rematerialization should not happen in Triton -> "
+                      "TritonGPU Conversion");
+     return {};
+diff --git a/lib/Dialect/TritonGPU/IR/Dialect.cpp b/lib/Dialect/TritonGPU/IR/Dialect.cpp
+index df3d3b042..e38c184f6 100644
+--- a/lib/Dialect/TritonGPU/IR/Dialect.cpp
++++ b/lib/Dialect/TritonGPU/IR/Dialect.cpp
+@@ -2867,13 +2879,13 @@ struct CanonicalizeConvertFromConvert
+     // heuristic to accommodate fused attention.
+     auto srcType = op.getSrc().getType();
+     auto dstType = op.getType();
+-    if (mlir::isa<DotOperandEncodingAttr>(dstType.getEncoding()) &&
+-        mlir::isa<NvidiaMmaEncodingAttr>(srcType.getEncoding()))
++    if (mlir::isa_and_nonnull<DotOperandEncodingAttr>(dstType.getEncoding()) &&
++        mlir::isa_and_nonnull<NvidiaMmaEncodingAttr>(srcType.getEncoding()))
+       return failure();
+ 
+     // for hopper MMAv3
+-    if (mlir::isa<SharedEncodingAttr>(dstType.getEncoding()) &&
+-        mlir::isa<NvidiaMmaEncodingAttr>(srcType.getEncoding()) &&
++    if (mlir::isa_and_nonnull<SharedEncodingAttr>(dstType.getEncoding()) &&
++        mlir::isa_and_nonnull<NvidiaMmaEncodingAttr>(srcType.getEncoding()) &&
+         llvm::any_of(op.getResult().getUsers(), [](Operation *dot) {
+           return dot->hasTrait<OpTrait::DotLike>();
+         })) {
