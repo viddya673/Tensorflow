@@ -74,6 +74,16 @@ TEST(TargetUtil, ObtainDeviceFunctionNameExp) {
             "__nv_fast_expf");
 }
 
+TEST(TargetUtil, ObtainDeviceFunctionNameLog) {
+  llvm::Triple triple("nvptx64-unknown-unknown");
+  EXPECT_EQ(ObtainDeviceFunctionName(TargetDeviceFunctionID::kLog,
+                                     /*output_type=*/F32, triple),
+            "__nv_logf");
+  EXPECT_EQ(ObtainDeviceFunctionName(TargetDeviceFunctionID::kLog,
+                                     /*output_type=*/BF16, triple),
+            "__nv_fast_logf");
+}
+
 }  // namespace
 }  // namespace gpu
 }  // namespace xla
