@@ -31,3 +31,45 @@ message Topology {
   // Chip position within the mesh
   repeated TopologyLocation mesh_location = 3;
 }
+
+// The logical topology of the job.
+message LogicalTopology {
+  // Logical metadata about a specific device.
+  message LogicalDevice {
+    // The id that uniquely identifies the device globally.
+    int32 global_id = 1;
+
+    // The id that uniquely identifies the device within its slice.
+    int32 slice_local_id = 2;
+
+    // The id that uniquely identifies the device within its host.
+    int32 host_local_id = 3;
+  }
+
+  // Logical metadata about a specific host.
+  message LogicalHost {
+    // The id that uniquely identifies the host globally.
+    int32 global_id = 1;
+
+    // The id that uniquely identifies the host within its slice.
+    int32 slice_local_id = 2;
+
+    // The physical addresses of the host.
+    repeated string physical_addresses = 3;
+
+    // The devices that are connected to this host.
+    repeated LogicalDevice devices = 4;
+  }
+
+  // Logical metadata about a specific slice.
+  message LogicalSlice {
+    // The id that uniquely identifies the slice globally.
+    int32 global_id = 1;
+
+    // The hosts that are part of this slice.
+    repeated LogicalHost hosts = 2;
+  }
+
+  // The slices that are part of the job.
+  repeated LogicalSlice slices = 1;
+}
