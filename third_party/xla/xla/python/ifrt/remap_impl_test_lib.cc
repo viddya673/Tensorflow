@@ -148,7 +148,7 @@ void AssertArrayContent(Client* client, Array* array,
 absl::StatusOr<ArraySpec> CreateArraySpec(
     Client* client, absl::Span<const int> device_indices) {
   TF_ASSIGN_OR_RETURN(tsl::RCReference<DeviceList> device_list,
-                      test_util::GetDevices(client, device_indices));
+                      test_util::GetAddressableDevices(client, device_indices));
   Shape shard_shape({2, 3});
   Shape shape({2 * static_cast<int64_t>(device_indices.size()), 3});
   return ArraySpec{/*dtype=*/DType(DType::kS32),
